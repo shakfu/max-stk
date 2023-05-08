@@ -1,9 +1,9 @@
 /**
     @file
-    stk.sine~: stk sine for Max
+    stk.delay~: stk delay for Max
+    lot to do... delay is very basic
 */
-#include "SineWave.h"
-// #include "RtWvOut.h"
+#include "Delay.h"
 #include <cstdlib>
 
 #include "ext.h"
@@ -12,20 +12,20 @@
 
 
 enum {
-    TIME = 1, 
-    PHASE, 
-    PHASE_OFFSET,
+    DELAY = 0, 
+    WET,
+    FEEDBACK,
     MAX_INLET_INDEX // -> maximum number of inlets (0-based)
 };
 
 // struct to represent the object's state
 typedef struct _stk {
     t_pxobject ob;          // the object itself (t_pxobject in MSP instead of t_object)
-    stk::SineWave* wave;    // stk sine wave object
-    double freq;            // frequency
-    double time;            // absolute time added in samples
-    double phase;           // Add a time in cycles (one cycle = TABLE_SIZE (2048 samples))
-    double phase_offset;    // Add a phase offset relative to any previous offset value
+    stk::Delay* delayline;  // stk non-interpolating delayline object
+    double delay;           // delay
+    double wet;             // dry/wet ratio (0.0-1.0)
+    double feedback_ratio;  // feedback_ratio (0.0-2.0)
+    double feedback;        // feedback
     long m_in;              // space for the inlet number used by all the proxies
     void *inlets[MAX_INLET_INDEX];
 } t_stk;
@@ -54,7 +54,7 @@ void ext_main(void *r)
     // unless you need to free allocated memory, in which case you should call dsp_free from
     // your custom free function.
 
-    t_class *c = class_new("stk.sine~", (method)stk_new, (method)stk_free, (long)sizeof(t_stk), 0L, A_GIMME, 0);
+    t_class *c = class_new("stk.delay~", (method)stk_new, (method)stk_free, (long)sizeof(t_stk), 0L, A_GIMME, 0);
 
     class_addmethod(c, (method)stk_float,    "float",    A_FLOAT, 0);
     class_addmethod(c, (method)stk_anything, "anything", A_GIMME, 0);
@@ -81,11 +81,12 @@ void *stk_new(t_symbol *s, long argc, t_atom *argv)
             x->inlets[i] = proxy_new((t_object *)x, i, &x->m_in);
         }
 
-        x->wave = new stk::SineWave;
-        x->freq = 0.0;
-        x->time = 0.0;
-        x->phase = 0.0;
-        x->phase_offset = 0.0;        
+        x->delayline = new stk::Delay;
+        x->delay = 0.0;
+        x->feedback = 0.0;
+        x->feedback_ratio = 0.1;
+        x->wet = 0.0;
+
     }
     return (x);
 }
@@ -93,7 +94,7 @@ void *stk_new(t_symbol *s, long argc, t_atom *argv)
 
 void stk_free(t_stk *x)
 {
-    delete x->wave;
+    delete x->delayline;
     dsp_free((t_pxobject *)x);
     for(int i = (MAX_INLET_INDEX - 1); i > 0; i--) {
         object_free(x->inlets[i]);
@@ -131,24 +132,19 @@ void stk_float(t_stk *x, double f)
 {
     switch (proxy_getinlet((t_object *)x)) {
         case 0:
-            // post("received in inlet 0");
-            x->freq = f;
-            // post("freq: %f", x->freq);
+            post("received in inlet 0");
+            x->delay = f;
+            post("delay: %f", x->delay);
             break;
         case 1:
-            // post("received in inlet 2");
-            x->time = f;
-            // post("time: %f", x->time);
+            post("received in inlet 2");
+            x->wet = f;
+            post("wet: %f", x->wet);
             break;
         case 2:
-            // post("received in inlet 3");
-            x->phase = f;
-            // post("phase: %f", x->phase);
-            break;
-        case 3:
-            // post("received in inlet 4");
-            x->phase_offset = f;
-            // post("phase_offset: %f", x->phase_offset);
+            post("received in inlet 3");
+            x->feedback_ratio = f;
+            post("feedback_ratio: %f", x->feedback_ratio);
             break;
     }
 }
@@ -160,9 +156,6 @@ void stk_dsp64(t_stk *x, t_object *dsp64, short *count, double samplerate, long 
     post("sample rate: %f", samplerate);
     post("maxvectorsize: %d", maxvectorsize);
 
-    stk::Stk::setSampleRate(samplerate);
-    x->wave->reset();
-
     object_method(dsp64, gensym("dsp_add64"), x, stk_perform64, 0, NULL);
 }
 
@@ -171,13 +164,20 @@ void stk_perform64(t_stk *x, t_object *dsp64, double **ins, long numins, double 
 {
     t_double *inL = ins[0];     // we get audio for each inlet of the object from the **ins argument
     t_double *outL = outs[0];   // we get audio for each outlet of the object from the **outs argument
+    t_double value, feedback, wet, wet_val, dry_val;
     int n = sampleframes;       // n = 64
-    x->wave->setFrequency(x->freq);
-    x->wave->addTime(x->time);
-    x->wave->addPhase(x->phase);
-    x->wave->addPhaseOffset(x->phase_offset);
+    x->delayline->setDelay(x->delay);
+    wet = x->wet;
+    feedback = x->feedback;
+
+
 
     while (n--) {
-        *outL++ = x->wave->tick();
+        value = *inL++ + feedback;
+        wet_val = wet * x->delayline->tick(value);
+        feedback = x->feedback_ratio * wet_val;
+        dry_val = (1 - wet) * value;
+        *outL++ = dry_val + wet_val;
     }
+    x->feedback = feedback;
 }
